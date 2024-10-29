@@ -329,18 +329,7 @@ save(properties, file = "property_data.RData")
 save(zones, file = "zones_data.RData")
 
 # --------
-property_counts <- properties %>%
-  group_by(ZONE_2021) %>%  
-  summarise(count = n())
 
-ggplot(property_counts, aes(x = ZONE_2021, y = count, fill = ZONE_2021)) + 
-  geom_bar(stat = "identity") +
-  labs(title = "Number of Properties by Zone Type",
-       x = "Zone Type",
-       y = "Number of Properties") +
-  theme_minimal() +
-  theme(legend.position = "none")
-# --------
 
 
 
