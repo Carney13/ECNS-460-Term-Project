@@ -132,11 +132,11 @@ m <- leaflet(zones) |>
   ) |>
   addCircleMarkers(
     data = data_points_sf,
-    color = "black",          # Color of the points
-    radius = 10*10^10000000,            # Size of the points
+    color = "black",          
+    radius = 10*10^10000000,           
     fillOpacity = 1,
-    stroke = TRUE,         # Add outline to the circles
-    weight = 2,            # Thickness of the outline
+    stroke = TRUE,        
+    weight = 2,            
     opacity = 5
   )
 m
@@ -324,7 +324,8 @@ properties$Sale.Amount <- replace(properties$Sale.Amount, properties$Sale.Amount
 
 
 #13.
-write.csv(properties, file = "CT_properties.csv")
+st_write(properties, "Spacial_Properties_CT.shp")
+#write.csv(properties, file = "CT_properties.csv")
 save(properties, file = "property_data.RData")
 save(zones, file = "zones_data.RData")
 
