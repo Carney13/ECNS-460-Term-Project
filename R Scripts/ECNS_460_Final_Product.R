@@ -16,6 +16,7 @@ library(tmap)
 library(leaflet)
 library(RColorBrewer)
 library(raster)
+library(tidymodels)
 #Load data
 load("Cleaned Data/property_data.RData")
 zones <- read_sf("Raw Data/ZONE_2021_Parcels/ZONE_2021_Parcels.shp")
@@ -49,9 +50,15 @@ moran.test(log(properties_clean$Sale.Amount), weights_clean)
 lisa <- localmoran(log(properties_clean$Sale.Amount), listw)
 
 # SPATIAL LAG MODEL
-sar_model <- lagsarlm(log(Sale.Amount) ~ log(Sales.Ratio) + factor(Zone.Classification) + 
-                        List.Year + log(Assessed.Value), data = properties_clean, listw = listw)
+properties_sam <- properties_clean[sample(nrow(properties_clean), 5000), ]
 
+coordinates1 <- st_coordinates(properties_sam$Location)
+neighbors_clean1 <- dnearneigh(coordinates1, 0, 0.01)
+listw1 <- nb2listw(neighbors_clean1, style = "W")
+
+sar_model <- lagsarlm(log(Sale.Amount) ~ Date.Recorded  + factor(Zone.Classification) + 
+                        List.Year + log(Assessed.Value), data = properties_sam, listw = listw1)
+summary(sar_model)
 # TIME SERIES ANALYSIS
 
 time_trends <- properties_clean |>
