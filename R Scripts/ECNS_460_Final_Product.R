@@ -17,6 +17,7 @@ library(leaflet)
 library(RColorBrewer)
 library(raster)
 library(tidymodels)
+library(randomForest)
 #Load data
 load("Cleaned Data/property_data.RData")
 
@@ -24,7 +25,7 @@ zones <- read_sf("Raw Data/ZONE_2021_Parcels/ZONE_2021_Parcels.shp")
 assets <- read_sf("Raw Data/Neighborhood_Assets/Neighborhood Assets.shp")
 build_types <- read.csv("Raw Data/Zones_Building_Types.csv")
 
-# --
+# -----------------------------------------
 #More Processing
 
 #Clean asset (facility data), remove duplicated IDs and NAs
@@ -72,6 +73,15 @@ data_clean <- left_join(data_clean, build_types, by = c("Zone.Classification" = 
 #only want non-NA sale amount values for this analysis
 data_clean <- data_clean[!is.na(data_clean$Sale.Amount), ]
 
+#create factors for these indicator variables
+data_clean <- data_clean |>
+  mutate(across(c("Storefront_Building", "Commercial_Center", "Commercial_House",
+                  "General_Building", "Small_General_Building", "Row_Building", "Double_House_A", 
+                  "House_A", "House_B", "House_C", "House_D", "Workshop", "Civic_Building", 
+                  "Patio_Outdoor_Site", "Open_Outdoor_Site"), as.factor))
+
+save(data_clean, file = file.path("Cleaned Data", "final_data.RData"))
+# ------------------------------------------
 
 # SPATIAL AUTOCORRELATION TEST
 coordinates <- st_coordinates(properties_clean$Location)
@@ -148,3 +158,53 @@ m <- leaflet() |>
 m
 
 # MACHINE LEARNING TO ESTIMATE SIGNIFICANCE OF ZONING CLASSIFICATIONS
+
+set.seed(1013)
+
+data_split = data_clean |> initial_split(prop = 0.8)
+# Grab each subset
+data_train = data_split |> training()
+data_test  = data_split |> testing()
+
+house_recipe = recipe(Sale.Amount ~ ., data = data_train) |>
+  # Set aside ID variable so we don't use it as a predictor
+  update_role(id, new_role = "id") |>
+  update_role(Address, new_role = "none") |>
+  update_role(Property.Type, new_role = "none") |>
+  update_role(Zone.Name, new_role = "none") |>
+  update_role(Non.Use.Code, new_role = "none") |>
+  update_role(Serial.Number, new_role = "none")|>
+  update_role(geometry, new_role = "none")|>
+  update_role(Location, new_role = "none")|>
+  step_log(Sale.Amount, Assessed.Value) |>
+  #create dummy variables from building types
+  step_dummy(all_nominal_predictors()) |>
+  # Remove predictors with ~0 variance
+  step_nzv(all_predictors())
+
+
+data_clean = house_recipe |> prep() |> juice()
+
+model_tree <- rand_forest(mode = "regression", mtry = tune(), min_n = tune()) |> 
+  set_engine("ranger")
+
+resamples <- vfold_cv(data_train, v = 5)
+
+workflow_tree = workflow() |>
+  add_model(model_tree) |>
+  add_recipe(house_recipe) |>
+  tune_grid(resamples = resamples)
+
+fit_tree = workflow_tree |>
+  fit(data_train)
+
+train_predictions <- fit_tree |> predict(data_train)
+train_results <- bind_cols(data_train, train_predictions)
+train_rmse <- rmse(train_results, truth = Sale.Amount, estimate = .pred)
+
+test_predictions <- fit_tree |> predict(data_test)
+test_results <- bind_cols(data_test, test_predictions)
+test_rmse <- rmse(test_results, truth = Sale.Amount, estimate = .pred)
+
+fit_tree
+rpart.plot(extract_fit_engine((fit_tree)))
