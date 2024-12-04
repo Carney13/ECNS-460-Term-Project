@@ -18,6 +18,8 @@ library(RColorBrewer)
 library(raster)
 library(tidymodels)
 library(randomForest)
+library(parralel)
+library(furrr)
 #Load data
 load("Cleaned Data/property_data.RData")
 
@@ -31,8 +33,8 @@ build_types <- read.csv("Raw Data/Zones_Building_Types.csv")
 #Clean asset (facility data), remove duplicated IDs and NAs
 assets <- st_transform(assets, crs = 4326)
 assets_clean <- assets %>%
-  filter(!is.na(Parcel_ID)) |>
-  filter(!duplicated(assets_clean$Parcel_ID))
+  filter(!is.na(Parcel_ID)) %>%
+  filter(!duplicated(Parcel_ID))
 
 #calculate distance (in meters) from all property locations to facility locations
 dist_matrix <- st_distance(properties, assets_clean)   
@@ -46,8 +48,8 @@ distance_df$property_id <- properties$id
 #pivot to long format to find the distance of each property from each facility
 distance_long_df <- distance_df %>%
   pivot_longer(cols = -property_id, names_to = "facility_id", values_to = "distance_m") %>%
-  mutate(facility_type = assets$Type[match(facility_id, assets$Parcel_ID)]) %>%
-  select(property_id, facility_id, facility_type, distance_m)
+  mutate(facility_type = assets_clean$Type[match(facility_id, assets_clean$Parcel_ID)]) %>%
+  dplyr::select(property_id, facility_id, facility_type, distance_m)
 
 #find the minimum distance for each property to each type of facility
 min_distance_per_type <- distance_long_df %>%
@@ -79,6 +81,15 @@ data_clean <- data_clean |>
                   "General_Building", "Small_General_Building", "Row_Building", "Double_House_A", 
                   "House_A", "House_B", "House_C", "House_D", "Workshop", "Civic_Building", 
                   "Patio_Outdoor_Site", "Open_Outdoor_Site"), as.factor))
+
+data_clean <- data_clean %>%
+  mutate_at(vars("Storefront_Building", "Commercial_Center", "Commercial_House",
+                 "General_Building", "Small_General_Building", "Row_Building", "Double_House_A", 
+                 "House_A", "House_B", "House_C", "House_D", "Workshop", "Civic_Building", 
+                 "Patio_Outdoor_Site", "Open_Outdoor_Site"), ~replace(., is.na(.), 0))
+
+data_clean <- data_clean |>
+  dplyr::select(-property_id)
 
 save(data_clean, file = file.path("Cleaned Data", "final_data.RData"))
 # ------------------------------------------
@@ -159,9 +170,18 @@ m
 
 # MACHINE LEARNING TO ESTIMATE SIGNIFICANCE OF ZONING CLASSIFICATIONS
 
+# Zone Case --------------------------------------------- 
+#Test case where Zone data is included
 set.seed(1013)
 
-data_split = data_clean |> initial_split(prop = 0.8)
+
+data_ml <- as.data.frame(data_clean)
+data_ml$Sale.Amount = log(data_ml$Sale.Amount)
+# Now, try to select the columns
+data_ml <- data_ml %>%
+  dplyr::select(-geometry, -Location)
+
+data_split = data_ml |> initial_split(prop = 0.8)
 # Grab each subset
 data_train = data_split |> training()
 data_test  = data_split |> testing()
@@ -174,9 +194,7 @@ house_recipe = recipe(Sale.Amount ~ ., data = data_train) |>
   update_role(Zone.Name, new_role = "none") |>
   update_role(Non.Use.Code, new_role = "none") |>
   update_role(Serial.Number, new_role = "none")|>
-  update_role(geometry, new_role = "none")|>
-  update_role(Location, new_role = "none")|>
-  step_log(Sale.Amount, Assessed.Value) |>
+  step_log(Assessed.Value) |>
   #create dummy variables from building types
   step_dummy(all_nominal_predictors()) |>
   # Remove predictors with ~0 variance
@@ -186,25 +204,211 @@ house_recipe = recipe(Sale.Amount ~ ., data = data_train) |>
 data_clean = house_recipe |> prep() |> juice()
 
 model_tree <- rand_forest(mode = "regression", mtry = tune(), min_n = tune()) |> 
-  set_engine("ranger")
+  set_engine("ranger", importance = "impurity")
 
-resamples <- vfold_cv(data_train, v = 5)
+resamples <- vfold_cv(data_train, v = 3)
 
 workflow_tree = workflow() |>
   add_model(model_tree) |>
-  add_recipe(house_recipe) |>
-  tune_grid(resamples = resamples)
+  add_recipe(house_recipe)
 
-fit_tree = workflow_tree |>
-  fit(data_train)
+plan(multisession, workers = parallel::detectCores() - 1)  # Use all cores except one
+
+# Parallelize the tuning process
+workflow_tree_cv <- workflow_tree |>
+  tune_grid(resamples = resamples, control = control_grid(parallel_over = "everything"))
+
+# Don't forget to reset the parallel plan to the default at the end
+plan(sequential)
+
+best_params <- workflow_tree_cv |> show_best(metric = "rmse")
+
+final_workflow <- workflow_tree |>
+  finalize_workflow(select_best(workflow_tree_cv))
+
+# Step 6: Fit the final model using the best hyperparameters
+fit_tree <- final_workflow |> fit(data_train)
+
+# -- Check variable importance
+rf_model <- fit_tree$fit$fit$fit
+
+# Check the variable importance (using ranger's importance function)
+rf_importance <- rf_model$variable.importance
+
+importance_df <- data.frame(
+  Variable = names(rf_importance),
+  Importance = as.numeric(rf_importance)
+)
+
+importance_df <- importance_df[order(-importance_df$Importance), ]
+
+ggplot(importance_df, aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  coord_flip() +  # This flips the axes so the variables are listed vertically
+  labs(title = "Variable Importance",
+       x = "Variables",
+       y = "Importance") +
+  theme_minimal()
+
+importance_df_rev <- importance_df[importance_df$Variable != "Assessed.Value", ]
+
+ggplot(importance_df_rev, aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  coord_flip() +  # This flips the axes so the variables are listed vertically
+  labs(title = "Variable Importance",
+       x = "Variables",
+       y = "Importance") +
+  theme_minimal()
+# ---
 
 train_predictions <- fit_tree |> predict(data_train)
+
+train_predictions <- fit_tree |> predict(new_data = data_train)
 train_results <- bind_cols(data_train, train_predictions)
-train_rmse <- rmse(train_results, truth = Sale.Amount, estimate = .pred)
 
-test_predictions <- fit_tree |> predict(data_test)
+train_results$pred_exp <- exp(train_results$.pred)
+train_results$truth_exp <- exp(train_results$Sale.Amount)
+
+train_rmse_dollars <- rmse(train_results, truth = truth_exp, estimate = pred_exp)
+
+# Print RMSE in dollars for the training data
+train_rmse_dollars
+
+test_predictions <- fit_tree |> predict(new_data = data_test)
+
 test_results <- bind_cols(data_test, test_predictions)
-test_rmse <- rmse(test_results, truth = Sale.Amount, estimate = .pred)
 
-fit_tree
-rpart.plot(extract_fit_engine((fit_tree)))
+test_results$pred_exp <- exp(test_results$.pred)
+test_results$truth_exp <- exp(test_results$Sale.Amount)
+
+test_rmse_dollars <- rmse(test_results, truth = truth_exp, estimate = pred_exp)
+
+# Print RMSE in dollars for the training data
+test_rmse_dollars
+
+# No Zones Case ------------------------------------------
+
+#Test case where NO Zone data is included
+
+data_ml2 <- data_ml |>
+  dplyr::select(-Zone.Name, -Zone.Classification, -Storefront_Building, 
+                -Commercial_Center, -Commercial_House, -General_Building, 
+                -Small_General_Building, -Row_Building, -Double_House_A, -House_A, 
+                -House_B, -House_C, -House_D, -Workshop, -Civic_Building, -Patio_Outdoor_Site, 
+               -Open_Outdoor_Site)
+  
+data_split2 = data_ml2 |> initial_split(prop = 0.8)
+# Grab each subset
+data_train2 = data_split2 |> training()
+data_test2  = data_split2 |> testing()
+
+house_recipe2 = recipe(Sale.Amount ~ ., data = data_train2) |>
+  # Set aside ID variable so we don't use it as a predictor
+  update_role(id, new_role = "id") |>
+  update_role(Address, new_role = "none") |>
+  update_role(Property.Type, new_role = "none") |>
+  update_role(Non.Use.Code, new_role = "none") |>
+  update_role(Serial.Number, new_role = "none")|>
+  step_log(Assessed.Value) |>
+  #create dummy variables from building types
+  step_dummy(all_nominal_predictors()) |>
+  # Remove predictors with ~0 variance
+  step_nzv(all_predictors())
+
+
+data_clean2 = house_recipe2 |> prep() |> juice()
+
+model_tree2 <- rand_forest(mode = "regression", mtry = tune(), min_n = tune()) |> 
+  set_engine("ranger",  importance = "impurity")
+
+resamples2 <- vfold_cv(data_train, v = 3)
+
+workflow_tree2 = workflow() |>
+  add_model(model_tree2) |>
+  add_recipe(house_recipe2)
+
+plan(multisession, workers = parallel::detectCores() - 1)  # Use all cores except one
+
+# Parallelize the tuning process
+workflow_tree_cv2 <- workflow_tree2 |>
+  tune_grid(resamples = resamples2, control = control_grid(parallel_over = "everything"))
+
+# Don't forget to reset the parallel plan to the default at the end
+plan(sequential)
+
+best_params <- workflow_tree_cv2 |> show_best(metric = "rmse")
+
+final_workflow2 <- workflow_tree2 |>
+  finalize_workflow(select_best(workflow_tree_cv2))
+
+# Step 6: Fit the final model using the best hyperparameters
+fit_tree2 <- final_workflow2 |> fit(data_train2)
+
+# -- Check variable importance
+rf_model2 <- fit_tree2$fit$fit$fit
+
+# Check the variable importance (using ranger's importance function)
+rf_importance2 <- rf_model2$variable.importance
+
+importance_df2 <- data.frame(
+  Variable = names(rf_importance2),
+  Importance = as.numeric(rf_importance2)
+)
+
+importance_df2 <- importance_df2[order(-importance_df2$Importance), ]
+
+ggplot(importance_df2, aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  coord_flip() +  # This flips the axes so the variables are listed vertically
+  labs(title = "Variable Importance",
+       x = "Variables",
+       y = "Importance") +
+  theme_minimal()
+
+
+importance_df2_rev <- importance_df2[importance_df2$Variable != "Assessed.Value", ]
+
+ggplot(importance_df2_rev, aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  coord_flip() +  # This flips the axes so the variables are listed vertically
+  labs(title = "Variable Importance",
+       x = "Variables",
+       y = "Importance") +
+  theme_minimal()
+
+# ---
+
+train_predictions_nz <- fit_tree2 |> predict(new_data = data_train2)
+train_results_nz <- bind_cols(data_train2, train_predictions_nz)
+
+train_results_nz$pred_exp <- exp(train_results_nz$.pred)
+train_results_nz$truth_exp <- exp(train_results_nz$Sale.Amount)
+
+train_rmse_dollars_nz <- rmse(train_results_nz, truth = truth_exp, estimate = pred_exp)
+
+# Print RMSE in dollars for the training data
+train_rmse_dollars_nz
+
+test_predictions_nz <- fit_tree2 |> predict(new_data = data_test2)
+
+test_results_nz <- bind_cols(data_test2, test_predictions_nz)
+
+test_results_nz$pred_exp <- exp(test_results_nz$.pred)
+test_results_nz$truth_exp <- exp(test_results_nz$Sale.Amount)
+
+test_rmse_dollars_nz <- rmse(test_results_nz, truth = truth_exp, estimate = pred_exp)
+
+# Print RMSE in dollars for the training data
+test_rmse_dollars_nz
+
+# --------------
+#save results
+model_comparison_df <- data.frame(
+  Model = rep(c("RF with zone data", "RF no zone data"), each = 2),
+  Dataset = rep(c("Train", "Test"), times = 2),
+  RMSE = c(train_rmse_dollars$.estimate, test_rmse_dollars$.estimate, 
+           train_rmse_dollars_nz$.estimate, test_rmse_dollars_nz$.estimate)
+)
+
+write.csv(model_comparison_df, "Cleaned Data", row.names = FALSE)
+

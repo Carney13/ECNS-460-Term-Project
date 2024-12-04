@@ -1,0 +1,5 @@
+"Model","Dataset","RMSE"
+"RF with zone data","Train",168921.713426943
+"RF with zone data","Test",395504.357387973
+"RF no zone data","Train",175977.598247087
+"RF no zone data","Test",469481.570001783
