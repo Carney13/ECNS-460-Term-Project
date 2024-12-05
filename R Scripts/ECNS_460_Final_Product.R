@@ -18,7 +18,7 @@ library(RColorBrewer)
 library(raster)
 library(tidymodels)
 library(randomForest)
-library(parralel)
+library(parallel)
 library(furrr)
 #Load data
 load("Cleaned Data/property_data.RData")
@@ -229,6 +229,7 @@ house_recipe = recipe(Sale.Amount ~ ., data = data_train) |>
   update_role(Address, new_role = "none") |>
   update_role(Property.Type, new_role = "none") |>
   update_role(Zone.Name, new_role = "none") |>
+  update_role(Sales.Ratio, new_role = "none") |>
   update_role(Non.Use.Code, new_role = "none") |>
   update_role(Serial.Number, new_role = "none")|>
   step_log(Assessed.Value) |>
@@ -367,6 +368,7 @@ house_recipe2 = recipe(Sale.Amount ~ ., data = data_train2) |>
   update_role(id, new_role = "id") |>
   update_role(Address, new_role = "none") |>
   update_role(Property.Type, new_role = "none") |>
+  update_role(Sales.Ratio, new_role = "none") |>
   update_role(Non.Use.Code, new_role = "none") |>
   update_role(Serial.Number, new_role = "none")|>
   step_log(Assessed.Value) |>
